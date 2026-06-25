@@ -1,33 +1,30 @@
-name: Scraper
-  
+name: Nepal Jobs Scraper
+
 on:
   schedule:
-    - cron: "0 */3 * * *"
+    - cron: "0 */2 * * *"   # every 3 hours
   workflow_dispatch:
     inputs:
       pages:
-        description: "Number of listing pages to scrape (each page ~ 10-15 companies)"
+        description: "Number of listing pages to scrape (0 = all)"
         required: false
         default: "0"
       max_jobs:
-        description: "Stop after this many new jobs processed (0 = no limit)"
+        description: "Stop after this many new jobs (0 = no limit)"
         required: false
         default: "0"
       enable_paraphrase:
-        description: "Paraphrase titles/descriptions via Mistral (1 = on, 0 = off)"
+        description: "Paraphrase via Mistral (1 = on, 0 = off)"
         required: false
         default: "1"
       resolve_apply_urls:
-        description: "Follow apply-now redirects to find the real application link (1 = on, 0 = off)"
+        description: "Follow apply-now redirects (1 = on, 0 = off)"
         required: false
         default: "1"
-  # schedule:
-  #   - cron: '0 */6 * * *'   # every 6 hours
 
-# Prevents two runs from overlapping and racing on the dedup tracker / double
-# posting the same job to WordPress.
+# Prevent two runs from overlapping and double-posting the same job
 concurrency:
-  group: myjobmag-sa-scraper
+  group: nepal-scraper
   cancel-in-progress: false
 
 permissions:
@@ -48,11 +45,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run scraper (paraphrase + dedupe + post to WordPress)
+      - name: Run scraper
         env:
-          SCRAPE_PAGES: ${{ github.event.inputs.pages || '0' }}
+          MAX_PAGES: ${{ github.event.inputs.pages || '0' }}
           MAX_JOBS: ${{ github.event.inputs.max_jobs || '0' }}
-          REQUEST_DELAY: "1.0"
+          REQUEST_DELAY: "2.0"
           RESOLVE_APPLY_URLS: ${{ github.event.inputs.resolve_apply_urls || '1' }}
           RESOLVE_DELAY: "0.5"
           ENABLE_PARAPHRASE: ${{ github.event.inputs.enable_paraphrase || '1' }}
@@ -60,16 +57,17 @@ jobs:
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-        run: python np.py
+        run: python nepal_scraper.py
 
-      - name: Upload run output (Excel + tracker CSV)
+      - name: Upload run artifacts (Excel + CSVs)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: myjobmag-sa-output-${{ github.run_number }}
+          name: nepal-jobs-output-${{ github.run_number }}
           path: |
-            myjobmag_sa_jobs.xlsx
+            jobs_output.xlsx
             processed_jobs.csv
+            flagged_no_apply.csv
           if-no-files-found: warn
 
       - name: Commit updated dedup tracker back to repo
@@ -77,6 +75,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add myjobmag_sa_processed.csv
-          git diff --cached --quiet || git commit -m "Update MyJobMag SA dedup tracker [skip ci]"
+          # Create the file if it doesn't exist yet so git add never fails
+          touch processed_jobs.csv flagged_no_apply.csv
+          git add processed_jobs.csv flagged_no_apply.csv
+          git diff --cached --quiet || git commit -m "chore: update Nepal dedup tracker [skip ci]"
           git push
