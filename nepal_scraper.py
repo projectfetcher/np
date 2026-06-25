@@ -1340,6 +1340,7 @@ def _save_excel(jobs):
 
 def main():
     start_time = datetime.now()
+    global WP_API_BASE, WP_JOBS_URL, WP_MEDIA_UR
     print()
     print(C_HEADER("=" * 80))
     print(C_HEADER("  JOBSNEPAL.COM SCRAPER + MISTRAL PARAPHRASE + WORDPRESS POSTING"))
@@ -1357,7 +1358,7 @@ def main():
     print(C_HEADER("=" * 80))
 
     # Auto-discover WP REST API endpoint
-    global WP_API_BASE, WP_JOBS_URL, WP_MEDIA_URL
+   # global WP_API_BASE, WP_JOBS_URL, WP_MEDIA_URL
     if WP_USER and WP_PASSWORD:
         discovered = probe_wp_api()
         if discovered and discovered != WP_API_BASE:
