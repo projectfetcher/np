@@ -1,3 +1,35 @@
+"""
+nepal_scraper.py
+================
+Scraper for https://www.jobsnepal.com/jobs
+
+Architecture mirrors the established five-file pattern but is self-contained
+in one file for ease of deployment. Matches the Malawi scraper structure:
+  - Paginated listing crawl (no sitemap — jobsnepal.com uses ?page=N)
+  - Detail page parse with verified selectors from live page inspection
+  - Deduplication via processed_jobs.csv tracker
+  - Public-apply-only rule: no email/URL → flagged_no_apply.csv, never posted
+  - Mistral paraphrase (title + description + company details)
+  - WordPress posting via REST API (/wp-json/wp/v2/posts)
+  - Excel export to jobs_output.xlsx
+  - Early-stop pagination: stops when all jobs on a page are already seen
+
+Verified selectors (from live page fetch 2026-06-25):
+  Listing:  h2 > a           → job title + relative URL
+            ul > li           → company name (1st), location (2nd), category (3rd+)
+            img[src]          → placeholder on listing, skip — use detail page
+  Detail:   h1                → job title
+            h2 > a[/employer] → company name + employer page URL
+            meta[og:image]    → company logo (img.jobsnepal.com/big/HASH.ext)
+            p (above Details) → company short blurb
+            table (Overview)  → Apply Before, Position Type, City, Posted Date,
+                                 Experience, Education, Openings, Offered Salary
+            div.details-requirements or div after h2:contains("Details")
+                              → job description body
+            a[href^=mailto:]  → apply email (inside description)
+            a[href^=http] in description → external apply URL
+"""
+
 import os
 import re
 import csv
@@ -99,6 +131,29 @@ _apply_url_cache: dict = {}
 
 # jobsnepal.com placeholder image — never use this as a logo
 JOBSNEPAL_PLACEHOLDER = "gray-back.jpg"
+
+# Domains that are document/file hosts, NOT application portals.
+# A link to drive.google.com is the vacancy PDF, not an apply button.
+# workspace.google.com is Gmail's homepage — a resolved mailto: redirect.
+# These are never valid apply_url values.
+_DOCUMENT_HOST_RE = re.compile(
+    r"^https?://(?:www\.)?"
+    r"(?:drive\.google\.com"
+    r"|docs\.google\.com"
+    r"|workspace\.google\.com"
+    r"|mail\.google\.com"
+    r"|dropbox\.com"
+    r"|onedrive\.live\.com"
+    r"|1drv\.ms"
+    r"|sharepoint\.com"
+    r"|box\.com"
+    r")/",
+    re.I,
+)
+
+def _is_document_host(url):
+    """Return True if url points to a file/document host rather than an apply portal."""
+    return bool(_DOCUMENT_HOST_RE.match(url or ""))
 
 # =============================================================================
 #  LOGGING / COLOUR
@@ -316,17 +371,24 @@ def resolve_apply_url(raw):
     return resolved
 
 def resolve_application_contact(raw_apply_url, description, raw_anchor_text=""):
-    """Return dict with apply_url and/or apply_email resolved from all sources."""
+    """
+    Return dict with apply_url and/or apply_email resolved from all sources.
+    Rejects document/file hosts (Google Drive, Dropbox, etc.) as apply_url —
+    these are tender PDFs, not application portals.
+    """
     result = {"apply_url": "", "apply_email": "", "apply_raw": raw_apply_url}
 
-    # If raw is already a bare email address
+    # If raw is already a bare email address (mailto: already stripped by caller)
     if raw_apply_url and re.match(r"^[A-Za-z0-9.+_-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$",
                                    raw_apply_url):
         result["apply_email"] = raw_apply_url
         return result
 
     if raw_apply_url and RESOLVE_APPLY_URLS:
-        result["apply_url"] = resolve_apply_url(raw_apply_url)
+        resolved = resolve_apply_url(raw_apply_url)
+        # Reject if resolved URL landed on a document host or known redirect trap
+        if resolved and not _is_document_host(resolved):
+            result["apply_url"] = resolved
 
     if not result["apply_url"]:
         result["apply_email"] = (
@@ -806,13 +868,18 @@ def parse_job_page(hint):
         company_details = " ".join(blurb_parts).strip()
 
     # ── Posted date ───────────────────────────────────────────────────────────
-    # "Job posted on 25 Jun, 2026" appears in a <p> near the h1
+    # "Job posted on 25 Jun, 2026" appears in a <p> near the h1.
+    # Must stop capture before "Apply before ..." which appears in the same element.
     posted_date = ""
     for tag in soup.find_all(["p", "span", "div"]):
         txt = clean_text(tag)
-        m = re.search(r"[Jj]ob\s+posted\s+on\s+([\w ,]+\d{4})", txt)
+        m = re.search(
+            r"[Jj]ob\s+posted\s+on\s+"
+            r"(\d{1,2}\s+\w+,?\s+\d{4})",   # "25 Jun, 2026" — stop at comma+year
+            txt,
+        )
         if m:
-            posted_date = m.group(1).strip()
+            posted_date = m.group(1).strip().rstrip(",")
             break
 
     # ── Overview table ────────────────────────────────────────────────────────
@@ -880,22 +947,27 @@ def parse_job_page(hint):
     raw_apply      = ""
     raw_anchor_txt = ""
 
-    # Look inside the description body element for links
     if details_h2:
         desc_container = details_h2.find_next_sibling()
         if desc_container:
-            # Priority 1: mailto: link
+            # Priority 1: mailto: link — extract email only, strip ?subject= etc.
             mailto = desc_container.find("a", href=re.compile(r"^mailto:", re.I))
             if mailto:
-                raw_apply      = re.sub(r"^mailto:", "", mailto["href"]).strip()
+                href_val = mailto["href"]
+                # Strip mailto: prefix and any query params (?subject=, ?cc=, etc.)
+                raw_apply      = re.sub(r"^mailto:", "", href_val, flags=re.I)
+                raw_apply      = raw_apply.split("?")[0].strip()
                 raw_anchor_txt = clean_text(mailto)
 
             # Priority 2: external http(s) link that isn't jobsnepal.com
+            # AND isn't a document/file host (Google Drive, Dropbox, etc.)
             if not raw_apply:
                 for a in desc_container.find_all("a", href=True):
-                    href = a["href"]
-                    if href.startswith("http") and "jobsnepal.com" not in href:
-                        raw_apply      = href
+                    href_val = a["href"]
+                    if (href_val.startswith("http")
+                            and "jobsnepal.com" not in href_val
+                            and not _is_document_host(href_val)):
+                        raw_apply      = href_val
                         raw_anchor_txt = clean_text(a)
                         break
 
@@ -903,7 +975,9 @@ def parse_job_page(hint):
     if not raw_apply:
         mailto = soup.find("a", href=re.compile(r"^mailto:", re.I))
         if mailto:
-            raw_apply      = re.sub(r"^mailto:", "", mailto["href"]).strip()
+            href_val  = mailto["href"]
+            raw_apply = re.sub(r"^mailto:", "", href_val, flags=re.I)
+            raw_apply = raw_apply.split("?")[0].strip()
             raw_anchor_txt = clean_text(mailto)
 
     log(f"    Resolving apply contact for '{title}' …")
@@ -1339,8 +1413,9 @@ def _save_excel(jobs):
 # =============================================================================
 
 def main():
+    # Must be declared before any read or write of these module-level variables
+    global WP_API_BASE, WP_JOBS_URL, WP_MEDIA_URL
     start_time = datetime.now()
-    global WP_API_BASE, WP_JOBS_URL, WP_MEDIA_UR
     print()
     print(C_HEADER("=" * 80))
     print(C_HEADER("  JOBSNEPAL.COM SCRAPER + MISTRAL PARAPHRASE + WORDPRESS POSTING"))
@@ -1358,7 +1433,6 @@ def main():
     print(C_HEADER("=" * 80))
 
     # Auto-discover WP REST API endpoint
-   # global WP_API_BASE, WP_JOBS_URL, WP_MEDIA_URL
     if WP_USER and WP_PASSWORD:
         discovered = probe_wp_api()
         if discovered and discovered != WP_API_BASE:
