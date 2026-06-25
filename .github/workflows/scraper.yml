@@ -2,7 +2,7 @@ name: Nepal Jobs Scraper
 
 on:
   schedule:
-    - cron: "0 */2 * * *"   # every 3 hours
+    - cron: "0 */3 * * *"   # every 3 hours
   workflow_dispatch:
     inputs:
       pages:
@@ -57,7 +57,7 @@ jobs:
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-        run: np.py
+        run: python nepal_scraper.py
 
       - name: Upload run artifacts (Excel + CSVs)
         if: always()
