@@ -10,7 +10,7 @@ in one file for ease of deployment. Matches the Malawi scraper structure:
   - Deduplication via processed_jobs.csv tracker
   - Public-apply-only rule: no email/URL → flagged_no_apply.csv, never posted
   - Mistral paraphrase (title + description + company details)
-  - WordPress posting via REST API (/wp-json/wp/v2/posts)
+  - WordPress posting via WP Job Manager REST API (/wp-json/wp/v2/job-listings)
   - Excel export to jobs_output.xlsx
   - Early-stop pagination: stops when all jobs on a page are already seen
 
@@ -96,9 +96,12 @@ WP_URL      = os.environ.get("WP_BASE_URL", "").rstrip("/")
 WP_USER     = os.environ.get("WP_USERNAME", "")
 WP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "")
 WP_BASE      = WP_URL
-WP_API_BASE  = f"{WP_BASE}/wp-json/wp/v2"
-WP_JOBS_URL  = f"{WP_API_BASE}/posts"
-WP_MEDIA_URL = f"{WP_API_BASE}/media"
+WP_API_BASE      = f"{WP_BASE}/wp-json/wp/v2"
+WP_JOBS_URL      = f"{WP_API_BASE}/job-listings"   # WP Job Manager custom post type
+WP_MEDIA_URL     = f"{WP_API_BASE}/media"
+WP_TAX_TYPE_URL  = f"{WP_API_BASE}/job_listing_type"    # employment type taxonomy
+WP_TAX_TAG_URL   = f"{WP_API_BASE}/job_listing_tag"     # tag taxonomy (if registered)
+WP_TAX_CAT_URL   = f"{WP_API_BASE}/job_listing_category" # category taxonomy
 
 # ── Mistral ───────────────────────────────────────────────────────────────────
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
@@ -1368,7 +1371,10 @@ def _wp_json(r, context=""):
         return None
 
 def probe_wp_api():
-    """Auto-discover the correct WP REST API base URL."""
+    """
+    Auto-discover the correct WP REST API base URL and verify the
+    job-listings endpoint is reachable (requires WP Job Manager plugin).
+    """
     root_domain = re.sub(r"^(https?://)[^.]+\.", r"\1", WP_BASE)
     candidates = list(dict.fromkeys(filter(None, [
         WP_API_BASE,
@@ -1376,17 +1382,25 @@ def probe_wp_api():
         f"{WP_BASE.rstrip('/')}/?rest_route=/wp/v2",
     ])))
     for base in candidates:
+        test_url = f"{base}/job-listings"
         try:
-            r = requests.get(f"{base}/posts", params={"per_page": 1},
+            r = requests.get(test_url, params={"per_page": 1},
                              headers=_wp_auth_headers(),
                              auth=(WP_USER, WP_PASSWORD),
                              timeout=10, verify=False)
             if r.status_code in (200, 401):
-                log_.info(f"✅ WP REST API reachable: {base} [{r.status_code}]")
+                log_.info(f"✅ WP job-listings endpoint reachable: {base} [{r.status_code}]")
                 return base
+            elif r.status_code == 404:
+                log_.warning(
+                    f"WP job-listings 404 at {base} — is WP Job Manager installed & activated?"
+                )
         except Exception as e:
             log_.debug(f"WP probe error {base}: {e}")
-    log_.error("❌ WP REST API unreachable. Check WP_BASE_URL, pretty permalinks, and security plugins.")
+    log_.error(
+        "❌ WP Job Manager REST endpoint unreachable.\n"
+        "   Check: WP Job Manager plugin installed, WP_BASE_URL correct, pretty permalinks on."
+    )
     return ""
 
 def get_or_create_term(taxonomy_url, name):
@@ -1520,17 +1534,19 @@ def post_job_to_wordpress(job):
         except Exception as e:
             log_.warning(f"Logo upload failed: {e}")
 
-    # Taxonomy terms
-    cat_term_id = get_or_create_term(f"{WP_API_BASE}/categories", location) if location else None
-    tag_names   = list(filter(None, [
-        job_type_s.replace("-", " ").title() if job_type_s else None,
-        category.split(",")[0].strip()       if category   else None,
-        job_field                            if job_field  else None,
-        company                              or None,
+    # WP Job Manager taxonomy terms
+    # job_listing_type  → employment type (Full Time, Contract, etc.)
+    # job_listing_category → job category / field
+    # job_listing_tag  → additional tags (company name, source, etc.)
+    type_term_id = get_or_create_term(WP_TAX_TYPE_URL, job_type_s.replace("-", " ").title()) if job_type_s else None
+    cat_term_id  = get_or_create_term(WP_TAX_CAT_URL,  job_field) if job_field else None
+    tag_names    = list(filter(None, [
+        category.split(",")[0].strip() if category else None,
+        company or None,
         "JobsNepal",
     ]))
     tag_ids = [tid for name in tag_names
-               for tid in [get_or_create_term(f"{WP_API_BASE}/tags", name)] if tid]
+               for tid in [get_or_create_term(WP_TAX_TAG_URL, name)] if tid]
 
     expiry_comment = f"<!-- job-expiry: {deadline} -->" if deadline else ""
     content = description + "\n\n" + expiry_comment + build_jsonld(job)
@@ -1565,10 +1581,12 @@ def post_job_to_wordpress(job):
             "_date_posted":        date_posted,
         },
     }
+    if type_term_id:
+        payload["job_listing_type"]     = [type_term_id]
     if cat_term_id:
-        payload["categories"] = [cat_term_id]
+        payload["job_listing_category"] = [cat_term_id]
     if tag_ids:
-        payload["tags"] = tag_ids
+        payload["job_listing_tag"]      = tag_ids
 
     h = _wp_auth_headers()
     for attempt in range(3):
@@ -1586,123 +1604,6 @@ def post_job_to_wordpress(job):
             if attempt < 2:
                 time.sleep(2 ** attempt)
     return None, None
-    if not WP_USER or not WP_PASSWORD:
-        return None, None
-
-    title       = sanitize_text(job.get("jobTitle", ""))
-    description = sanitize_text(job.get("jobDescription", ""))
-    if not title or not description:
-        log_.warning("Skipping WP post — missing title or description")
-        return None, None
-
-    slug = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]", "-", title.lower())).strip("-")[:80]
-
-    # Duplicate check
-    try:
-        r     = _wp_get(WP_JOBS_URL, params={"slug": slug, "status": "publish"})
-        posts = _wp_json(r, f"duplicate check slug={slug}")
-        if isinstance(posts, list) and posts:
-            log_.info(f"⏭ Already on WP: {title}")
-            return posts[0]["id"], posts[0].get("link")
-    except Exception:
-        pass
-
-    logo_url    = sanitize_text(job.get("companyLogo", ""), is_url=True)
-    location    = sanitize_text(job.get("jobLocation", ""))
-    raw_type    = sanitize_text(job.get("jobType", "")) or "Full Time"
-    job_type_s  = JOB_TYPE_MAPPING.get(raw_type.lower().strip(), "full-time")
-    company     = sanitize_text(job.get("companyName", ""))
-    application = sanitize_text(job.get("application", ""), is_url=True)
-    deadline    = sanitize_text(job.get("deadline", ""))
-    co_website  = sanitize_text(job.get("companyWebsite", ""), is_url=True)
-    about       = sanitize_text(job.get("companyDetails", ""))
-    date_posted = sanitize_text(job.get("datePosted", ""))
-    salary      = sanitize_text(job.get("salary", ""))
-    category    = sanitize_text(job.get("category", ""))
-
-    is_email_app = bool(re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", application))
-    is_url_app   = bool(re.match(r"^https?://[^\s]+$", application))
-    if not (is_email_app or is_url_app):
-        application = ""
-
-    # Upload logo
-    attachment_id = None
-    if logo_url:
-        try:
-            img_r = SESSION.get(logo_url, timeout=15)
-            if img_r.status_code == 200:
-                ct  = img_r.headers.get("Content-Type", "image/jpeg")
-                ext = ("png" if "png" in ct else "gif" if "gif" in ct
-                       else "webp" if "webp" in ct else "jpg")
-                fn  = re.sub(r"-{2,}", "-",
-                             re.sub(r"[^a-z0-9]", "-", company.lower())).strip("-") + f"-logo.{ext}"
-                up_h = {**_wp_auth_headers(),
-                        "Content-Disposition": f'attachment; filename="{fn}"',
-                        "Content-Type": ct}
-                up_r = requests.post(WP_MEDIA_URL, headers=up_h, data=img_r.content,
-                                     auth=(WP_USER, WP_PASSWORD), timeout=20, verify=False)
-                if up_r.status_code in (200, 201):
-                    up_data = _wp_json(up_r, "media upload")
-                    if up_data:
-                        attachment_id = up_data.get("id")
-        except Exception as e:
-            log_.warning(f"Logo upload failed: {e}")
-
-    # Taxonomy terms
-    cat_term_id = get_or_create_term(f"{WP_API_BASE}/categories", location) if location else None
-    tag_names   = list(filter(None, [
-        job_type_s.replace("-", " ").title() if job_type_s else None,
-        category.split(",")[0].strip() if category else None,
-        company or None,
-        "JobsNepal",
-    ]))
-    tag_ids = [tid for name in tag_names
-               for tid in [get_or_create_term(f"{WP_API_BASE}/tags", name)] if tid]
-
-    expiry_comment = f"<!-- job-expiry: {deadline} -->" if deadline else ""
-    content = description + "\n\n" + expiry_comment + build_jsonld(job)
-
-    payload = {
-        "title":          title,
-        "content":        content,
-        "slug":           slug,
-        "status":         "publish",
-        "featured_media": attachment_id or 0,
-        "meta": {
-            "_job_location":    location,
-            "_job_type":        job_type_s,
-            "_application":     application,
-            "_job_expires":     deadline,
-            "_company_name":    company,
-            "_company_website": co_website,
-            "_company_logo":    str(attachment_id) if attachment_id else "",
-            "_company_details": about,
-            "_date_posted":     date_posted,
-            "_salary":          salary,
-        },
-    }
-    if cat_term_id:
-        payload["categories"] = [cat_term_id]
-    if tag_ids:
-        payload["tags"] = tag_ids
-
-    h = _wp_auth_headers()
-    for attempt in range(3):
-        try:
-            r = requests.post(WP_JOBS_URL, json=payload, headers=h,
-                              auth=(WP_USER, WP_PASSWORD), timeout=20, verify=False)
-            r.raise_for_status()
-            post = _wp_json(r, f"create post '{title}'")
-            if not post:
-                raise ValueError("Empty/invalid JSON in post response")
-            log_.info(f"✅ Posted: '{title}' → WP ID {post.get('id')}")
-            return post.get("id"), post.get("link")
-        except Exception as e:
-            log_.error(f"WP post attempt {attempt+1} failed: {e}")
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-    return None, None
-
 # =============================================================================
 #  EXCEL EXPORT
 # =============================================================================
@@ -1770,7 +1671,7 @@ def _save_excel(jobs):
 
 def main():
     # Must be declared before any read or write of these module-level variables
-    global WP_API_BASE, WP_JOBS_URL, WP_MEDIA_URL
+    global WP_API_BASE, WP_JOBS_URL, WP_MEDIA_URL, WP_TAX_TYPE_URL, WP_TAX_TAG_URL, WP_TAX_CAT_URL
     start_time = datetime.now()
     print()
     print(C_HEADER("=" * 80))
@@ -1793,9 +1694,12 @@ def main():
         discovered = probe_wp_api()
         if discovered and discovered != WP_API_BASE:
             log(C_BLUE(f"  ℹ️  WP API base corrected to: {discovered}"))
-            WP_API_BASE  = discovered
-            WP_JOBS_URL  = f"{WP_API_BASE}/posts"
-            WP_MEDIA_URL = f"{WP_API_BASE}/media"
+            WP_API_BASE      = discovered
+            WP_JOBS_URL      = f"{WP_API_BASE}/job-listings"
+            WP_MEDIA_URL     = f"{WP_API_BASE}/media"
+            WP_TAX_TYPE_URL  = f"{WP_API_BASE}/job_listing_type"
+            WP_TAX_TAG_URL   = f"{WP_API_BASE}/job_listing_tag"
+            WP_TAX_CAT_URL   = f"{WP_API_BASE}/job_listing_category"
         elif not discovered:
             log(C_RED("  ⚠️  WP posting will be skipped — REST API unreachable"))
 
