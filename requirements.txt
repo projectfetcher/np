@@ -1,0 +1,8 @@
+requests==2.33.1
+beautifulsoup4==4.14.3
+openpyxl==3.1.5
+lxml==5.3.0
+pandas>=2.0.0
+sentence-transformers>=2.7.0
+language-tool-python==2.7.1
+nltk>=3.8.0
