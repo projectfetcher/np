@@ -533,28 +533,36 @@ def resolve_apply_url(raw):
 
 def resolve_application_contact(raw_apply_url, description, raw_anchor_text=""):
     """
-    Return dict with apply_url and/or apply_email resolved from all sources.
-    Rejects document/file hosts (Google Drive, Dropbox, etc.) as apply_url —
-    these are tender PDFs, not application portals.
+    Return dict with apply_url and/or apply_email.
+
+    Priority order:
+      1. Email from raw_apply_url (when it's already a bare email address)
+      2. Email from raw_anchor_text (visible text of the apply link)
+      3. Email scanned from description body text
+      4. External URL (only when no email found anywhere)
+
+    Document/file hosts (Google Drive, Dropbox, etc.) are always rejected as URLs.
     """
     result = {"apply_url": "", "apply_email": "", "apply_raw": raw_apply_url}
 
-    # If raw is already a bare email address (mailto: already stripped by caller)
+    # Step 1: raw value is already a bare email (mailto: stripped by caller)
     if raw_apply_url and re.match(r"^[A-Za-z0-9.+_-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$",
                                    raw_apply_url):
         result["apply_email"] = raw_apply_url
         return result
 
+    # Step 2 & 3: look for email in anchor text then description — email wins over URL
+    email = extract_email(raw_anchor_text) or extract_email(description)
+    if email:
+        result["apply_email"] = email
+        return result
+
+    # Step 4: no email found — try resolving the URL
     if raw_apply_url and RESOLVE_APPLY_URLS:
         resolved = resolve_apply_url(raw_apply_url)
-        # Reject if resolved URL landed on a document host or known redirect trap
         if resolved and not _is_document_host(resolved):
             result["apply_url"] = resolved
 
-    if not result["apply_url"]:
-        result["apply_email"] = (
-            extract_email(raw_anchor_text) or extract_email(description)
-        )
     return result
 
 # =============================================================================
@@ -1105,62 +1113,68 @@ def parse_job_page(hint):
         deadline = extract_deadline_from_text(description)
 
     # ── Apply contact ─────────────────────────────────────────────────────────
-    # jobsnepal.com jobs use three patterns for apply links:
-    #   1. <a href="mailto:email@org.np"> — proper mailto
-    #   2. <a href="https://gmail.com"><u>email@org.np</u></a> — gmail href, email as text
-    #   3. <a href="https://company.org/careers"> — real external portal
-    # Pattern 2 is the most common trap — href resolves to Gmail login page.
-    raw_apply      = ""
-    raw_anchor_txt = ""
+    # Priority: email > URL.
+    # jobsnepal.com uses three link patterns:
+    #   1. <a href="mailto:email@org.np">
+    #   2. <a href="https://gmail.com"><u>email@org.np</u></a>  ← most common trap
+    #   3. <a href="https://company.org/apply">
+    # We always prefer an email address. URL is only used when no email found anywhere.
+
+    raw_apply      = ""    # will hold email string or URL string
+    raw_anchor_txt = ""    # visible text of the apply anchor
 
     def _extract_from_anchor(a_tag):
-        """Return (raw_apply, anchor_text) from any <a> element."""
+        """Return (value, anchor_text) — value is an email string or href URL."""
         href = a_tag.get("href", "")
         text = clean_text(a_tag)
-        if href.startswith("mailto:") or href.lower().startswith("mailto:"):
+        if href.lower().startswith("mailto:"):
             email = re.sub(r"^mailto:", "", href, flags=re.I).split("?")[0].strip()
             return email, text
         if _is_generic_mail_href(href):
-            # Real email is the anchor text
-            email = EMAIL_RE.search(text)
-            if email:
-                return email.group(0), text
+            m = EMAIL_RE.search(text)
+            if m:
+                return m.group(0), text
             return "", text
         return href, text
 
+    candidate_url = ""   # best external URL found (used only if no email anywhere)
+
+    search_containers = []
     if details_h2:
-        desc_container = details_h2.find_next_sibling()
-        if desc_container:
-            # Priority 1: any mailto: or generic-mail-href link
-            for a in desc_container.find_all("a", href=True):
-                href = a.get("href", "")
-                if href.startswith("mailto:") or _is_generic_mail_href(href):
-                    raw_apply, raw_anchor_txt = _extract_from_anchor(a)
-                    if raw_apply:
-                        break
+        sib = details_h2.find_next_sibling()
+        if sib:
+            search_containers.append(sib)
+    # Always also check whole page as fallback
+    search_containers.append(soup)
 
-            # Priority 2: external http(s) link that isn't jobsnepal.com or a doc host
-            if not raw_apply:
-                for a in desc_container.find_all("a", href=True):
-                    href = a.get("href", "")
-                    if (href.startswith("http")
-                            and "jobsnepal.com" not in href
-                            and not _is_document_host(href)
-                            and not _is_generic_mail_href(href)):
-                        raw_apply      = href
-                        raw_anchor_txt = clean_text(a)
-                        break
-
-    # Fallback: search whole page for mailto or generic mail link
-    if not raw_apply:
-        for a in soup.find_all("a", href=True):
+    for container in search_containers:
+        if raw_apply:   # already found an email
+            break
+        for a in container.find_all("a", href=True):
             href = a.get("href", "")
-            if href.startswith("mailto:") or _is_generic_mail_href(href):
-                raw_apply, raw_anchor_txt = _extract_from_anchor(a)
-                if raw_apply:
+            # Email sources: mailto: or generic webmail href
+            if href.lower().startswith("mailto:") or _is_generic_mail_href(href):
+                val, txt = _extract_from_anchor(a)
+                if val:
+                    raw_apply      = val
+                    raw_anchor_txt = txt
                     break
+            # URL source: external, not jobsnepal, not doc host — store but keep scanning
+            if (not candidate_url
+                    and href.startswith("http")
+                    and "jobsnepal.com" not in href
+                    and not _is_document_host(href)
+                    and not _is_generic_mail_href(href)):
+                candidate_url  = href
+                raw_anchor_txt = clean_text(a)
+
+    # If no email link found, fall back to the best URL candidate
+    if not raw_apply and candidate_url:
+        raw_apply = candidate_url
 
     log(f"    Resolving apply contact for '{title}' …")
+    # resolve_application_contact will also scan description text for email
+    # before accepting any URL, enforcing the email-first rule end-to-end
     application = resolve_application_contact(raw_apply, description, raw_anchor_txt)
 
     return {
