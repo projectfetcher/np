@@ -1,35 +1,3 @@
-"""
-nepal_scraper.py
-================
-Scraper for https://www.jobsnepal.com/jobs
-
-Architecture mirrors the established five-file pattern but is self-contained
-in one file for ease of deployment. Matches the Malawi scraper structure:
-  - Paginated listing crawl (no sitemap — jobsnepal.com uses ?page=N)
-  - Detail page parse with verified selectors from live page inspection
-  - Deduplication via processed_jobs.csv tracker
-  - Public-apply-only rule: no email/URL → flagged_no_apply.csv, never posted
-  - Mistral paraphrase (title + description + company details)
-  - WordPress posting via REST API (/wp-json/wp/v2/posts)
-  - Excel export to jobs_output.xlsx
-  - Early-stop pagination: stops when all jobs on a page are already seen
-
-Verified selectors (from live page fetch 2026-06-25):
-  Listing:  h2 > a           → job title + relative URL
-            ul > li           → company name (1st), location (2nd), category (3rd+)
-            img[src]          → placeholder on listing, skip — use detail page
-  Detail:   h1                → job title
-            h2 > a[/employer] → company name + employer page URL
-            meta[og:image]    → company logo (img.jobsnepal.com/big/HASH.ext)
-            p (above Details) → company short blurb
-            table (Overview)  → Apply Before, Position Type, City, Posted Date,
-                                 Experience, Education, Openings, Offered Salary
-            div.details-requirements or div after h2:contains("Details")
-                              → job description body
-            a[href^=mailto:]  → apply email (inside description)
-            a[href^=http] in description → external apply URL
-"""
-
 import os
 import re
 import csv
