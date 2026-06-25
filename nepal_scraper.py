@@ -115,6 +115,167 @@ JOB_TYPE_MAPPING = {
     "other":     "other",
 }
 
+# Hosts where href="https://gmail.com" etc. but the real email is the anchor text
+_GENERIC_MAIL_HOSTS = {
+    "gmail.com", "mail.google.com", "yahoo.com", "yahoo.co.uk", "yahoo.com.np",
+    "hotmail.com", "outlook.com", "live.com", "protonmail.com",
+    "mail.com", "ymail.com", "aol.com",
+}
+
+def _is_generic_mail_href(href):
+    """Return True when href points to a webmail homepage, not an apply portal."""
+    try:
+        host = urlparse(href).netloc.lower().lstrip("www.")
+        return host in _GENERIC_MAIL_HOSTS
+    except Exception:
+        return False
+
+# =============================================================================
+#  QUALIFICATION / EXPERIENCE / JOB-FIELD NORMALISATION
+# =============================================================================
+
+QUALIFICATION_TIERS = [
+    ("PhD / Doctorate",
+     ["phd","ph.d","doctorate","doctoral","doctor of philosophy"]),
+    ("Master's Degree",
+     ["master","msc","m.sc","ma ","m.a ","mba","m.b.a","meng","m.eng","mphil",
+      "m.p.h","mph","postgraduate","post-graduate","post graduate"]),
+    ("Bachelor's Degree",
+     ["bachelor","bsc","b.sc","ba ","b.a ","beng","b.eng","bcom","b.com","bba",
+      "llb","degree in","undergraduate degree","honours degree","hons"]),
+    ("Higher National Diploma",
+     ["hnd","hnc","higher national diploma","higher national certificate",
+      "higher diploma","advanced diploma"]),
+    ("Diploma",
+     ["diploma","dip ","dip.","associate degree","foundation degree",
+      "proficiency certificate"]),
+    ("Professional Certification",
+     ["acca","cpa","cfa","cima","pmp","prince2","cissp","aws certified",
+      "comptia","cisco","ccna","ccnp","shrm","cipd","chartered",
+      "certified public","certified financial","certified project",
+      "professional certification","professional certificate"]),
+    ("A-Levels / HSC",
+     ["a-level","a level","hsc","higher school certificate","ib diploma",
+      "international baccalaureate","gce advanced","10+2","class 12","slc passed"]),
+    ("O-Levels / School Certificate",
+     ["o-level","o level","igcse","gcse","school certificate",
+      "sc ","slc","see","secondary education examination"]),
+    ("No Formal Qualification Required",
+     ["no qualification","no degree","no formal","school leaver",
+      "entry level","no experience required","training provided","will train"]),
+]
+
+_NO_EXP_KW  = ["no experience","no prior experience","fresh graduate","freshers",
+                "entry level","entry-level","training provided","will train",
+                "no experience required"]
+_LESS1_KW   = ["less than 1 year","under 1 year","6 months","less than a year",
+                "some experience","minimal experience"]
+
+# Compiled patterns for safe word-boundary matching
+_NO_EXP_RE  = re.compile(
+    r"\bno\s+(?:prior\s+)?experience\b|"
+    r"\bfresh\s+graduate[s]?\b|\bfreshers?\b|"
+    r"\bentry[\s-]level\b|"
+    r"\btraining\s+provided\b|\bwill\s+train\b|"
+    r"\b0\s+years?\b|"
+    r"\bno\s+experience\s+required\b",
+    re.I,
+)
+_LESS1_RE   = re.compile(
+    r"\bless\s+than\s+(?:a\s+)?1\s+year\b|\bunder\s+1\s+year\b|"
+    r"\b6\s+months?\b|\bsix\s+months?\b|"
+    r"\bminimal\s+experience\b|\bsome\s+experience\b",
+    re.I,
+)
+
+def normalise_qualification(raw: str) -> str:
+    """Map raw education text to a standardised tier label."""
+    if not raw:
+        return ""
+    low = raw.lower()
+    for label, keywords in QUALIFICATION_TIERS:
+        if any(kw in low for kw in keywords):
+            return label
+    # If it just says "please check details/vacancy" return empty
+    if re.search(r"please\s+check", low):
+        return ""
+    return raw.strip()
+
+def normalise_experience(raw: str) -> str:
+    """
+    Map raw experience text to a standard band:
+      No Experience Required | Less than 1 Year | 1 - 2 Years |
+      3 - 5 Years | 6 - 10 Years | 10+ Years
+    """
+    if not raw:
+        return ""
+    low = raw.lower()
+    if re.search(r"please\s+check", low):
+        return ""
+    if _NO_EXP_RE.search(low):
+        return "No Experience Required"
+    if _LESS1_RE.search(low):
+        return "Less than 1 Year"
+    # Extract the first integer — handles "2+ years", "2–3 years", "at least 3 years"
+    nums = re.findall(r"\d+", low)
+    if nums:
+        n        = int(nums[0])
+        has_plus = bool(re.search(r"\d+\s*\+|\bmore\s+than\b|\babove\b|\bover\b", low))
+        if n == 0:                    return "No Experience Required"
+        if n <= 2:                    return "1 - 2 Years"
+        if n <= 5:                    return "3 - 5 Years"
+        if n < 10:                    return "6 - 10 Years"
+        if n == 10 and not has_plus:  return "6 - 10 Years"
+        return "10+ Years"
+    return raw.strip()
+
+# Job field mapping — maps category/keyword to a canonical field label
+JOB_FIELD_MAP = [
+    ("Information Technology",      ["information technology","it jobs","software","developer","programmer",
+                                     "data analyst","cyber","network","database","devops","computer"]),
+    ("Accounting & Finance",        ["accounting","finance","financial","audit","tax","bookkeeping",
+                                     "treasurer","fiscal","accounts"]),
+    ("Administration & Management", ["administration","management","admin","office manager",
+                                     "executive assistant","operations","coordinator"]),
+    ("Healthcare & Public Health",  ["health","medical","nurse","doctor","clinical","pharmacy",
+                                     "public health","epidemiology","physician","midwife"]),
+    ("Engineering",                 ["engineer","engineering","civil","mechanical","electrical",
+                                     "structural","architecture","construction","surveyor"]),
+    ("Education & Training",        ["teacher","education","training","lecturer","tutor","instructor",
+                                     "academic","school","university","curriculum"]),
+    ("NGO / Development",           ["ngo","ingo","development project","humanitarian","social work",
+                                     "community development","advocacy","livelihood","gender"]),
+    ("Research & Consultancy",      ["research","survey","evaluation","consultant","consultancy",
+                                     "analyst","assessment","study","investigation"]),
+    ("Sales & Marketing",           ["sales","marketing","business development","brand","digital marketing",
+                                     "advertising","promotions","crm"]),
+    ("Logistics & Supply Chain",    ["logistics","supply chain","procurement","warehouse","driver",
+                                     "transport","fleet","delivery","customs"]),
+    ("Legal",                       ["legal","lawyer","attorney","law","compliance","paralegal","judicial"]),
+    ("Media & Communications",      ["media","journalism","communication","pr ","public relations",
+                                     "photography","videography","content","reporter","editor"]),
+    ("Agriculture & Environment",   ["agriculture","agronomy","livestock","veterinary","forestry",
+                                     "environment","climate","irrigation","fisheries"]),
+    ("Hospitality & Tourism",       ["hospitality","hotel","tourism","catering","restaurant",
+                                     "travel","housekeeping","chef","cook"]),
+    ("Tender / Expression of Interest", ["tender","expression of interest","eoi","bid","itb","rfp",
+                                          "request for proposal","invitation to bid","reoi","tor "]),
+]
+
+def normalise_job_field(category: str, title: str = "", description: str = "") -> str:
+    """Map category / title / description text to a canonical job field."""
+    combined = f"{category} {title}".lower()
+    for field_label, keywords in JOB_FIELD_MAP:
+        if any(kw in combined for kw in keywords):
+            return field_label
+    # Try description as last resort
+    if description:
+        desc_low = description[:500].lower()
+        for field_label, keywords in JOB_FIELD_MAP:
+            if any(kw in desc_low for kw in keywords):
+                return field_label
+    return "Other"
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -944,41 +1105,60 @@ def parse_job_page(hint):
         deadline = extract_deadline_from_text(description)
 
     # ── Apply contact ─────────────────────────────────────────────────────────
+    # jobsnepal.com jobs use three patterns for apply links:
+    #   1. <a href="mailto:email@org.np"> — proper mailto
+    #   2. <a href="https://gmail.com"><u>email@org.np</u></a> — gmail href, email as text
+    #   3. <a href="https://company.org/careers"> — real external portal
+    # Pattern 2 is the most common trap — href resolves to Gmail login page.
     raw_apply      = ""
     raw_anchor_txt = ""
+
+    def _extract_from_anchor(a_tag):
+        """Return (raw_apply, anchor_text) from any <a> element."""
+        href = a_tag.get("href", "")
+        text = clean_text(a_tag)
+        if href.startswith("mailto:") or href.lower().startswith("mailto:"):
+            email = re.sub(r"^mailto:", "", href, flags=re.I).split("?")[0].strip()
+            return email, text
+        if _is_generic_mail_href(href):
+            # Real email is the anchor text
+            email = EMAIL_RE.search(text)
+            if email:
+                return email.group(0), text
+            return "", text
+        return href, text
 
     if details_h2:
         desc_container = details_h2.find_next_sibling()
         if desc_container:
-            # Priority 1: mailto: link — extract email only, strip ?subject= etc.
-            mailto = desc_container.find("a", href=re.compile(r"^mailto:", re.I))
-            if mailto:
-                href_val = mailto["href"]
-                # Strip mailto: prefix and any query params (?subject=, ?cc=, etc.)
-                raw_apply      = re.sub(r"^mailto:", "", href_val, flags=re.I)
-                raw_apply      = raw_apply.split("?")[0].strip()
-                raw_anchor_txt = clean_text(mailto)
+            # Priority 1: any mailto: or generic-mail-href link
+            for a in desc_container.find_all("a", href=True):
+                href = a.get("href", "")
+                if href.startswith("mailto:") or _is_generic_mail_href(href):
+                    raw_apply, raw_anchor_txt = _extract_from_anchor(a)
+                    if raw_apply:
+                        break
 
-            # Priority 2: external http(s) link that isn't jobsnepal.com
-            # AND isn't a document/file host (Google Drive, Dropbox, etc.)
+            # Priority 2: external http(s) link that isn't jobsnepal.com or a doc host
             if not raw_apply:
                 for a in desc_container.find_all("a", href=True):
-                    href_val = a["href"]
-                    if (href_val.startswith("http")
-                            and "jobsnepal.com" not in href_val
-                            and not _is_document_host(href_val)):
-                        raw_apply      = href_val
+                    href = a.get("href", "")
+                    if (href.startswith("http")
+                            and "jobsnepal.com" not in href
+                            and not _is_document_host(href)
+                            and not _is_generic_mail_href(href)):
+                        raw_apply      = href
                         raw_anchor_txt = clean_text(a)
                         break
 
-    # Fallback: search whole page for mailto
+    # Fallback: search whole page for mailto or generic mail link
     if not raw_apply:
-        mailto = soup.find("a", href=re.compile(r"^mailto:", re.I))
-        if mailto:
-            href_val  = mailto["href"]
-            raw_apply = re.sub(r"^mailto:", "", href_val, flags=re.I)
-            raw_apply = raw_apply.split("?")[0].strip()
-            raw_anchor_txt = clean_text(mailto)
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "")
+            if href.startswith("mailto:") or _is_generic_mail_href(href):
+                raw_apply, raw_anchor_txt = _extract_from_anchor(a)
+                if raw_apply:
+                    break
 
     log(f"    Resolving apply contact for '{title}' …")
     application = resolve_application_contact(raw_apply, description, raw_anchor_txt)
@@ -1085,8 +1265,8 @@ def process_job(raw_job, processed_ids, processed_urls, seen_content):
         "jobLocation":       raw_job.get("location", ""),
         "category":          raw_job.get("category", ""),
         "salary":            raw_job.get("salary", ""),
-        "experience":        raw_job.get("experience", ""),
-        "education":         raw_job.get("education", ""),
+        "experience":        normalise_experience(raw_job.get("experience", "")),
+        "education":         normalise_qualification(raw_job.get("education", "")),
         "openings":          raw_job.get("openings", ""),
         "datePosted":        raw_job.get("posted_date", ""),
         "deadline":          raw_job.get("deadline", ""),
@@ -1095,6 +1275,11 @@ def process_job(raw_job, processed_ids, processed_urls, seen_content):
         "companyLogo":       raw_job.get("company_logo", ""),
         "companyWebsite":    company_website,
         "jobUrl":            job_url,
+        "jobField":          normalise_job_field(
+                                 raw_job.get("category", ""),
+                                 title,
+                                 description,
+                             ),
         "_jobId":            job_id,
         "_apply_method":     apply_method,
         "_apply_raw":        raw_job.get("apply_raw", ""),
@@ -1114,6 +1299,7 @@ def print_job_verbose(index, job):
     print(f"  {C_LABEL('Title (original)')}    : {C_VALUE(job.get('originalTitle',''))}")
     print(f"  {C_LABEL('Title (paraphrased)')} : {C_GREEN(job.get('jobTitle',''))}")
     print(f"  {C_LABEL('Job Type')}             : {job.get('jobType','') or C_DIM('—')}")
+    print(f"  {C_LABEL('Job Field')}            : {job.get('jobField','') or C_DIM('—')}")
     print(f"  {C_LABEL('Category')}             : {job.get('category','') or C_DIM('—')}")
     print(f"  {C_LABEL('Location')}             : {job.get('jobLocation','') or C_DIM('—')}")
     print(f"  {C_LABEL('Salary')}               : {job.get('salary','') or C_DIM('—')}")
@@ -1275,6 +1461,138 @@ def post_job_to_wordpress(job):
     except Exception:
         pass
 
+    logo_url    = sanitize_text(job.get("companyLogo", ""),    is_url=True)
+    location    = sanitize_text(job.get("jobLocation", ""))
+    raw_type    = sanitize_text(job.get("jobType", ""))        or "Full Time"
+    job_type_s  = JOB_TYPE_MAPPING.get(raw_type.lower().strip(), "full-time")
+    company     = sanitize_text(job.get("companyName", ""))
+    application = sanitize_text(job.get("application", ""),    is_url=True)
+    deadline    = sanitize_text(job.get("deadline", ""))
+    co_website  = sanitize_text(job.get("companyWebsite", ""), is_url=True)
+    about       = sanitize_text(job.get("companyDetails", ""))
+    date_posted = sanitize_text(job.get("datePosted", ""))
+    salary      = sanitize_text(job.get("salary", ""))
+    category    = sanitize_text(job.get("category", ""))
+    qualif      = sanitize_text(job.get("education", ""))      # already normalised
+    experience  = sanitize_text(job.get("experience", ""))     # already normalised
+    job_field   = sanitize_text(job.get("jobField", ""))
+
+    # Validate application value
+    is_email_app = bool(re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", application))
+    is_url_app   = bool(re.match(r"^https?://[^\s]+$", application))
+    if not (is_email_app or is_url_app):
+        application = ""
+
+    # Upload logo
+    attachment_id = None
+    if logo_url:
+        try:
+            img_r = SESSION.get(logo_url, timeout=15)
+            if img_r.status_code == 200:
+                ct  = img_r.headers.get("Content-Type", "image/jpeg")
+                ext = ("png" if "png" in ct else "gif" if "gif" in ct
+                       else "webp" if "webp" in ct else "jpg")
+                fn  = re.sub(r"-{2,}", "-",
+                             re.sub(r"[^a-z0-9]", "-", company.lower())).strip("-") + f"-logo.{ext}"
+                up_h = {**_wp_auth_headers(),
+                        "Content-Disposition": f'attachment; filename="{fn}"',
+                        "Content-Type": ct}
+                up_r = requests.post(WP_MEDIA_URL, headers=up_h, data=img_r.content,
+                                     auth=(WP_USER, WP_PASSWORD), timeout=20, verify=False)
+                if up_r.status_code in (200, 201):
+                    up_data = _wp_json(up_r, "media upload")
+                    if up_data:
+                        attachment_id = up_data.get("id")
+        except Exception as e:
+            log_.warning(f"Logo upload failed: {e}")
+
+    # Taxonomy terms
+    cat_term_id = get_or_create_term(f"{WP_API_BASE}/categories", location) if location else None
+    tag_names   = list(filter(None, [
+        job_type_s.replace("-", " ").title() if job_type_s else None,
+        category.split(",")[0].strip()       if category   else None,
+        job_field                            if job_field  else None,
+        company                              or None,
+        "JobsNepal",
+    ]))
+    tag_ids = [tid for name in tag_names
+               for tid in [get_or_create_term(f"{WP_API_BASE}/tags", name)] if tid]
+
+    expiry_comment = f"<!-- job-expiry: {deadline} -->" if deadline else ""
+    content = description + "\n\n" + expiry_comment + build_jsonld(job)
+
+    payload = {
+        "title":          title,
+        "content":        content,
+        "slug":           slug,
+        "status":         "publish",
+        "featured_media": attachment_id or 0,
+        "meta": {
+            "_job_title":          title,
+            "_job_location":       location,
+            "_job_type":           job_type_s,
+            "_job_description":    description,
+            "_application":        application,
+            "_company_url":        co_website,        # alias expected by some WP Job Manager versions
+            "_job_expires":        deadline,
+            "_company_name":       company,
+            "_company_website":    co_website,
+            "_company_logo":       str(attachment_id) if attachment_id else "",
+            "_company_industry":   job_field,         # best proxy we have for industry
+            "_company_address":    location,          # city-level address from Overview table
+            "_company_founded":    "",                # not available on jobsnepal.com
+            "_company_type":       "",                # not available on jobsnepal.com
+            "_company_tagline":    "",                # not available on jobsnepal.com
+            "_company_details":    about,
+            "_job_qualifications": qualif,
+            "_job_experiences":    experience,
+            "_job_field":          job_field,
+            "_job_salary":         salary,
+            "_date_posted":        date_posted,
+        },
+    }
+    if cat_term_id:
+        payload["categories"] = [cat_term_id]
+    if tag_ids:
+        payload["tags"] = tag_ids
+
+    h = _wp_auth_headers()
+    for attempt in range(3):
+        try:
+            r = requests.post(WP_JOBS_URL, json=payload, headers=h,
+                              auth=(WP_USER, WP_PASSWORD), timeout=20, verify=False)
+            r.raise_for_status()
+            post = _wp_json(r, f"create post '{title}'")
+            if not post:
+                raise ValueError("Empty/invalid JSON in post response")
+            log_.info(f"✅ Posted: '{title}' → WP ID {post.get('id')}")
+            return post.get("id"), post.get("link")
+        except Exception as e:
+            log_.error(f"WP post attempt {attempt+1} failed: {e}")
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+    return None, None
+    if not WP_USER or not WP_PASSWORD:
+        return None, None
+
+    title       = sanitize_text(job.get("jobTitle", ""))
+    description = sanitize_text(job.get("jobDescription", ""))
+    if not title or not description:
+        log_.warning("Skipping WP post — missing title or description")
+        return None, None
+
+    slug = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]", "-", title.lower())).strip("-")[:80]
+
+    # Duplicate check
+    try:
+        r     = _wp_get(WP_JOBS_URL, params={"slug": slug, "status": "publish"})
+        posts = _wp_json(r, f"duplicate check slug={slug}")
+        if isinstance(posts, list) and posts:
+            log_.info(f"⏭ Already on WP: {title}")
+            return posts[0]["id"], posts[0].get("link")
+    except Exception:
+        pass
+
     logo_url    = sanitize_text(job.get("companyLogo", ""), is_url=True)
     location    = sanitize_text(job.get("jobLocation", ""))
     raw_type    = sanitize_text(job.get("jobType", "")) or "Full Time"
@@ -1376,7 +1694,7 @@ def post_job_to_wordpress(job):
 # =============================================================================
 
 EXCEL_HEADERS = [
-    "Job Title", "Job Type", "Category", "Job Location", "Salary",
+    "Job Title", "Job Type", "Job Field", "Category", "Job Location", "Salary",
     "Experience", "Education", "Openings", "Date Posted", "Deadline",
     "Job Description", "Application", "Apply Method",
     "Company Name", "Company Logo", "Company Website", "Company Details",
@@ -1384,6 +1702,30 @@ EXCEL_HEADERS = [
 ]
 
 def _save_excel(jobs):
+    if not _XLSX_AVAILABLE:
+        log_.warning("openpyxl not installed — skipping Excel export")
+        return
+    if not jobs:
+        return
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Nepal Jobs"
+    ws.append(EXCEL_HEADERS)
+    for job in jobs:
+        ws.append([
+            job.get("jobTitle", ""),      job.get("jobType", ""),
+            job.get("jobField", ""),      job.get("category", ""),
+            job.get("jobLocation", ""),   job.get("salary", ""),
+            job.get("experience", ""),    job.get("education", ""),
+            job.get("openings", ""),      job.get("datePosted", ""),
+            job.get("deadline", ""),      job.get("jobDescription", ""),
+            job.get("application", ""),   job.get("_apply_method", ""),
+            job.get("companyName", ""),   job.get("companyLogo", ""),
+            job.get("companyWebsite",""), job.get("companyDetails", ""),
+            job.get("jobUrl", ""),
+        ])
+    wb.save(OUTPUT_FILE)
+    log_.info(f"Saved {len(jobs)} rows → {OUTPUT_FILE}")
     if not _XLSX_AVAILABLE:
         log_.warning("openpyxl not installed — skipping Excel export")
         return
