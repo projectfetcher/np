@@ -2,7 +2,7 @@ name: Nepal Jobs Scraper
 
 on:
   schedule:
-    - cron: "0 */3 * * *"   # every 3 hours
+    - cron: '37 1 */2 * *'   # every 3 hours
   workflow_dispatch:
     inputs:
       pages:
