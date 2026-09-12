@@ -1363,7 +1363,7 @@ def print_job_verbose(index, job):
 
 def _wp_auth_headers():
     token = base64.b64encode(f"{WP_USER}:{WP_PASSWORD}".encode()).decode()
-    return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+    return {"Authorization": f"Basic {token}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
 
 def _wp_get(path, params=None):
     return requests.get(path, params=params, headers=_wp_auth_headers(),
