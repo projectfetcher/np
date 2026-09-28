@@ -2,7 +2,7 @@
 name: keepalive
 on:
   schedule:
-    - cron: '0 3 1 * *'   # once a month, 03:00 UTC on the 1st
+    - cron: '9 1 11 * *'   # once a month, 03:00 UTC on the 1st
   workflow_dispatch:
 
 jobs:
